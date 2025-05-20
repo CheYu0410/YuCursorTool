@@ -1,49 +1,55 @@
-# Cursor Pro 自动化工具使用说明
+# YuCursor - Cursor Tool 編輯器自動化工具
 
+## 專案介紹
+YuCursor 是一款專為 Cursor 編輯器設計的帳號管理和自動化工具，幫助用戶輕鬆創建和管理多個 Cursor 帳號。
 
-[English doc](./README.EN.md)
+## 版本資訊
+- 當前版本：1.0.1
+- 發布日期：2025年5月20日
 
+## 更新日誌
+### 版本 1.0.1 (2025年5月20日)
+- 修復了應用程式關閉時可能發生的事件迴圈錯誤（"Event loop is closed"）
+  - 添加了 `_app_is_closing` 全局變數來標記應用關閉狀態
+  - 改進了 `use_account`、`reload_accounts_manager` 等函數檢查應用關閉狀態
+  - 優化了 `UILogHandler.stop_redirect` 方法在應用關閉時的行為
+- 更新了應用版本資訊（從 1.0.0 更新至 1.0.1）
+- 嘗試新增「更新日誌」標籤頁
 
-## 在线文档
-[cursor-auto-free-doc.vercel.app](https://cursor-auto-free-doc.vercel.app)
+### 版本 1.0.0 (2025年5月19日)
+- 初始版本發布
 
+## 功能概述
+- 自動註冊新帳號 - 透過自動化流程創建新的 Cursor 帳號
+- 帳號管理 - 儲存和管理多個 Cursor 帳號，方便快速切換
+- 重置機器碼 - 重置機器識別碼，解決一些登入限制問題
 
-## 公众号 回复 1 获取 qq 群
+## 使用說明
+1. 點擊「功能操作」標籤頁進行各種操作
+2. 點擊「帳號管理」標籤頁查看和管理已儲存的帳號
+3. 使用右上角的設定按鈕配置應用程式參數
 
-![公众号](./screen/qrcode_for_gh_c985615b5f2b_258.jpg)
+## 許可證聲明
+本項目採用 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/) 許可證。
+這意味著您可以：
+- 分享 — 在任何媒介以任何形式複製、發行本作品
+但必須遵守以下條件：
+- 非商業性使用 — 您不得將本作品用於商業目的
 
-## 英文名字集
-https://github.com/toniprada/usa-names-dataset
+## 聲明
+- 本專案僅供學習交流使用，請勿用於商業用途。
+- 本專案不承擔任何法律責任，使用本專案造成的任何後果，由使用者自行承擔。
+- 本工具永久免費，請勿從任何渠道購買。
 
-## 许可证声明
-本项目采用 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/) 许可证。
-这意味着您可以：
-- 分享 — 在任何媒介以任何形式复制、发行本作品
-但必须遵守以下条件：
-- 非商业性使用 — 您不得将本作品用于商业目的
+## 特別鳴謝
+本專案的開發過程中得到了眾多開源專案和社區成員的支持與幫助，在此特別感謝：
 
-## 声明
-- 本项目仅供学习交流使用，请勿用于商业用途。
-- 本项目不承担任何法律责任，使用本项目造成的任何后果，由使用者自行承担。
+### 開源專案
+- [go-cursor-help](https://github.com/yuaotian/go-cursor-help) - 一個優秀的 Cursor 機器碼重置工具，本專案的機器碼重置功能使用該專案實現。該專案目前已獲得 9.1k Stars，是最受歡迎的 Cursor 輔助工具之一。
 
+### 非常感謝 Journey 這個開源專案
+Journey ([cursor-auto-free](https://github.com/chengazhen/cursor-auto-free)) 是一個傑出的開源貢獻，為本專案提供了寶貴的靈感和技術參考。該專案的創新思維和精湛代碼結構讓我們獲益良多，在此向作者表達誠摯的謝意和由衷的敬佩！
 
-
-## 骗子
-海豚
-
-
-## 感谢 linuxDo 这个开源社区(一个真正的技术社区)
-https://linux.do/
-
-## 特别鸣谢
-本项目的开发过程中得到了众多开源项目和社区成员的支持与帮助，在此特别感谢：
-
-### 开源项目
-- [go-cursor-help](https://github.com/yuaotian/go-cursor-help) - 一个优秀的 Cursor 机器码重置工具，本项目的机器码重置功能使用该项目实现。该项目目前已获得 9.1k Stars，是最受欢迎的 Cursor 辅助工具之一。
-
-## 请我喝杯茶 | buy me a cup of tea
-<img src="./screen/image.png" width="300"/>
-<img src="./screen/28613e3f3f23a935b66a7ba31ff4e3f.jpg" width="300"/>
- <img src="./screen/mm_facetoface_collect_qrcode_1738583247120.png" width="300"/>
-
-
+## 交流社群
+- QQ群：[點擊加入](https://qm.qq.com/q/aQjqnsGwHC)
+- Discord群：[點擊加入](https://discord.gg/UKZCsrdFJ3)
