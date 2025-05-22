@@ -353,6 +353,13 @@ def update_cursor_auth(email=None, access_token=None, refresh_token=None):
             logging.debug(f"Email: {email}")
             logging.debug(f"Access Token: {access_token[:10]}..." if access_token else "無")
             logging.debug(f"Refresh Token: {refresh_token[:10]}..." if refresh_token else "無")
+            
+            # 將結果寫入特殊標記檔案，以便GUI可以檢測到認證更新
+            try:
+                with open("auth_updated.flag", "w", encoding="utf-8") as f:
+                    f.write(f"認證資訊已更新,{email}")
+            except Exception as write_err:
+                logging.error(f"無法寫入認證更新標記: {str(write_err)}")
         else:
             logging.error("認證資訊更新失敗")
             
@@ -711,7 +718,7 @@ def poll_for_login_result(uuid, challenge):
 
 def save_account_info(email=None, password=None, 
                    access_token=None, refresh_token=None,
-                   user_id=None, cookie=None) -> bool:
+                   user_id=None, cookie=None, membership=None, account_status=None, usage=None) -> bool:
     """
     將帳號資訊保存為JSON檔案
     
@@ -722,6 +729,9 @@ def save_account_info(email=None, password=None,
         refresh_token: 刷新令牌
         user_id: 用戶ID
         cookie: 完整cookie
+        membership: 會員資訊
+        account_status: 帳號狀態
+        usage: 用量資訊
     
     Returns:
         bool: 是否成功保存
@@ -742,6 +752,9 @@ def save_account_info(email=None, password=None,
         refresh_token = remove_ansi_codes(refresh_token)
         user_id = remove_ansi_codes(user_id)
         cookie = remove_ansi_codes(cookie)
+        membership = remove_ansi_codes(membership)
+        account_status = remove_ansi_codes(account_status)
+        usage = remove_ansi_codes(usage)
         
         logging.info("保存帳號資訊")
         
@@ -763,6 +776,9 @@ def save_account_info(email=None, password=None,
             "refresh_token": refresh_token,
             "user_id": user_id,
             "cookie": cookie,
+            "membership": membership,
+            "account_status": account_status,
+            "usage": usage,
             "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
@@ -792,6 +808,9 @@ def save_account_info(email=None, password=None,
                 access_token=access_token,
                 refresh_token=refresh_token,
                 user_id=user_id,
+                membership=membership,
+                account_status=account_status,
+                usage=usage,
                 created_at_override=current_time
             )
             
@@ -822,6 +841,12 @@ def save_account_info(email=None, password=None,
                                 account['refresh_token'] = refresh_token
                             if user_id is not None:
                                 account['user'] = user_id
+                            if membership is not None:
+                                account['membership'] = membership
+                            if account_status is not None:
+                                account['account_status'] = account_status
+                            if usage is not None:
+                                account['usage'] = usage
                             account['updated_at'] = current_time
                             found = True
                             logging.info(f"透過直接JSON操作更新現有帳號")
@@ -841,6 +866,12 @@ def save_account_info(email=None, password=None,
                             new_account['refresh_token'] = refresh_token
                         if user_id is not None:
                             new_account['user'] = user_id
+                        if membership is not None:
+                            new_account['membership'] = membership
+                        if account_status is not None:
+                            new_account['account_status'] = account_status
+                        if usage is not None:
+                            new_account['usage'] = usage
                         
                         accounts.append(new_account)
                         logging.info(f"透過直接JSON操作添加新帳號")
@@ -918,6 +949,61 @@ def sign_up_and_save(headless=True):
             token_info = get_cursor_session_token(tab)
             
             if token_info and token_info["token"]:
+                # 在儲存前獲取帳號的用量和會員資訊
+                logging.info("獲取帳號用量和會員資訊...")
+                membership_info = None
+                usage_info = None
+                
+                try:
+                    # 使用 cursor_acc_info 中的方法獲取用量資訊
+                    import cursor_acc_info
+                    token = token_info["token"]
+                    
+                    # 獲取用量資訊
+                    logging.info(f"獲取用量資訊...")
+                    usage_info = cursor_acc_info.UsageManager.get_usage(token)
+                    if usage_info:
+                        logging.info(f"成功獲取用量資訊: {usage_info}")
+                    else:
+                        logging.warning("無法獲取用量資訊，將使用預設值")
+                        usage_info = {
+                            "premium_usage": 0, 
+                            "max_premium_usage": 50, 
+                            "basic_usage": 0, 
+                            "max_basic_usage": "No Limit"
+                        }
+                    
+                    # 獲取會員資訊
+                    logging.info(f"獲取會員資訊...")
+                    membership_info = cursor_acc_info.UsageManager.get_stripe_profile(token)
+                    if membership_info:
+                        logging.info(f"成功獲取會員資訊: {membership_info}")
+                        account_status = cursor_acc_info.format_subscription_type(membership_info)
+                    else:
+                        logging.warning("無法獲取會員資訊，將使用預設值")
+                        membership_info = {
+                            "membershipType": "free",
+                            "daysRemainingOnTrial": 0,
+                            "verifiedStudent": False
+                        }
+                        account_status = "Free"
+                except Exception as e:
+                    logging.error(f"獲取用量和會員資訊時出錯: {str(e)}")
+                    traceback.print_exc()
+                    # 使用預設值
+                    usage_info = {
+                        "premium_usage": 0, 
+                        "max_premium_usage": 50, 
+                        "basic_usage": 0, 
+                        "max_basic_usage": "No Limit"
+                    }
+                    membership_info = {
+                        "membershipType": "free",
+                        "daysRemainingOnTrial": 0,
+                        "verifiedStudent": False
+                    }
+                    account_status = "Free"
+                
                 # 儲存帳號資訊
                 save_account_info(
                     email=account,
@@ -925,7 +1011,10 @@ def sign_up_and_save(headless=True):
                     access_token=token_info["token"],
                     refresh_token=token_info["token"],
                     user_id=token_info["user_id"],
-                    cookie=token_info["full_cookie"]
+                    cookie=token_info["full_cookie"],
+                    membership=membership_info,
+                    account_status=account_status,
+                    usage=usage_info
                 )
                 
                 # 更新認證資訊

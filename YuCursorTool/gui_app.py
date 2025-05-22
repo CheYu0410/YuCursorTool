@@ -8,6 +8,16 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'venv',
 os.environ["FLET_FORCE_WEB_VIEW"] = "true"
 os.environ["FLET_VIEW"] = "gui"
 
+# 定義全局變數
+accounts_manager = None
+refresh_account_list = None
+refresh_current_account = None
+_flet_page_instance = None
+_app_is_closing = False
+current_account_email = None
+manual_verification_code = None
+g_keep_alive_process = None
+
 # 添加圖示相關路徑
 def get_resource_path(relative_path):
     """獲取資源的絕對路徑，無論是運行腳本還是打包後的 exe"""
@@ -37,6 +47,16 @@ from selenium.webdriver.chrome.service import Service
 import pyperclip
 import base64
 import traceback # 確保 traceback 可用
+import cursor_acc_info # <--- 導入 cursor_acc_info 模組
+
+# 預先初始化關鍵模組
+try:
+    if accounts_manager is None:
+        accounts_manager = AccountsManager()
+        print("已預先初始化 AccountsManager")
+except Exception as e:
+    print(f"預先初始化 AccountsManager 失敗: {str(e)}")
+    traceback.print_exc()
 
 # Module-level variable to hold the Flet page instance
 _flet_page_instance = None
@@ -216,11 +236,34 @@ class UILogHandler:
         self.page.update()
 
 def main(page: ft.Page):
+    # 確保首先導入需要的模組
+    from accounts_manager import AccountsManager
+    from cursor_auth_manager import CursorAuthManager
+    
     # 設置全局變數，讓外部函數可以訪問
     global accounts_manager, refresh_account_list, refresh_current_account
-    global _flet_page_instance, _app_is_closing # Declare that we intend to modify the module-level variable
-    _flet_page_instance = page # Assign the actual Flet page to our module-level variable
+    global _flet_page_instance, _app_is_closing, current_account_email
+    _flet_page_instance = page
+    current_account_email = None # 初始化為 None
     
+    # 初始化帳號管理器 (不管是否為重啟模式都需要)
+    try:
+        accounts_manager = AccountsManager()
+        print("帳號管理器已初始化")
+    except Exception as e:
+        print(f"初始化帳號管理器失敗: {str(e)}")
+        traceback.print_exc()
+    
+    # 檢查是否為重啟模式，如果是則進行額外初始化
+    is_restarted = "--restarted" in sys.argv
+    if is_restarted:
+        print("在主函數中檢測到重啟模式，進行額外初始化...")
+        # 確保全局對象已正確初始化
+        if 'accounts_manager' not in globals() or accounts_manager is None:
+            from accounts_manager import AccountsManager
+            accounts_manager = AccountsManager()
+            print("已在重啟模式下重新初始化 accounts_manager")
+
     page.title = "YuCursor" # 修改視窗標題
     page.vertical_alignment = ft.MainAxisAlignment.START
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
@@ -365,6 +408,9 @@ def main(page: ft.Page):
     ui_log_handler = UILogHandler(log_view)
     ui_log_handler.start_redirect()
     ui_log_handler.set_page(page)  # 設置頁面引用
+    
+    # 將 ui_log_handler 保存到 page 實例中
+    page._ui_log_handler = ui_log_handler
 
     # 初始化帳號管理器
     accounts_manager = AccountsManager()
@@ -393,56 +439,152 @@ def main(page: ft.Page):
                 # 嘗試重新載入帳號管理器
                 # reload_accounts_manager() # 避免循環調用或潛在問題，如果需要確保已載入，應在更高層次處理
                 accounts = accounts_manager.get_accounts() # 直接再次獲取
+            
+            # 使用集合確保帳號唯一性
+            processed_emails = set()
                 
             # 為每個帳號創建一個卡片
             if accounts:
                 for account in accounts:
-                    email = account.get("email", "未知")
+                    email = account.get('email', '')
                     
-                    # 檢查是否含有ANSI控制碼
-                    if "\u001b" in email:
-                        print(f"發現含有ANSI控制碼的郵箱，進行清理: {email}")
-                        # 清理ANSI控制碼
-                        import re
-                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                        email = ansi_escape.sub('', email)
-                        # 更新帳號
-                        print(f"清理後的郵箱: {email}")
-                        account["email"] = email
-                        accounts_manager._save_accounts()
+                    # 如果這個郵箱已經處理過，則跳過，避免重複顯示
+                    if email in processed_emails:
+                        continue
                     
-                    password = account.get("password", "")
-                    created_time = account.get("created_at", "")
+                    # 將此郵箱添加到已處理集合
+                    processed_emails.add(email)
                     
-                    # 創建卡片
+                    # 以下是原有的卡片創建邏輯
+                    password = account.get('password', '')
+                    created_at = account.get('created_at', '未知時間')
+                    updated_at = account.get('updated_at', '未知時間')
+                    
+                    # 這個是當前使用的帳號嗎？
+                    is_current = False
+                    if current_account_email and email == current_account_email:
+                        is_current = True
+                    
+                    # 初始化狀態顯示和進度條變數
+                    status_text = "Free"
+                    subscription_text = "快速回應: 0/50"
+                    usage_percent = 0
+                    progress_color = ft.Colors.GREEN
+                    has_usage_info = False
+                    
+                    # 獲取會員資訊（如果有）
+                    if account.get('membership') and isinstance(account['membership'], dict):
+                        membership = account['membership']
+                        if membership.get('type'):
+                            status_text = membership.get('type')
+                    
+                    # 獲取使用資訊（如果有）
+                    if account.get('usage') and isinstance(account['usage'], dict):
+                        usage = account['usage']
+                        has_usage_info = True
+                        try:
+                            if 'premium_usage' in usage and 'max_premium_usage' in usage:
+                                # 確保將字符串轉換為數字
+                                try:
+                                    premium_usage = int(usage.get('premium_usage', 0))
+                                except (ValueError, TypeError):
+                                    print(f"警告: 帳號 {email} 的 premium_usage 無法轉換為整數: {usage.get('premium_usage')}")
+                                    premium_usage = 0
+                                
+                                try:
+                                    max_premium_usage = int(usage.get('max_premium_usage', 50))
+                                except (ValueError, TypeError):
+                                    print(f"警告: 帳號 {email} 的 max_premium_usage 無法轉換為整數: {usage.get('max_premium_usage')}")
+                                    max_premium_usage = 50
+                                
+                                # 防止除零錯誤
+                                if max_premium_usage <= 0:
+                                    max_premium_usage = 100
+                                
+                                # 計算使用比例
+                                usage_percent = min(premium_usage / max_premium_usage, 1.0)
+                                
+                                # 根據使用百分比決定顏色
+                                if usage_percent > 0.8:
+                                    progress_color = ft.Colors.RED
+                                elif usage_percent > 0.6:
+                                    progress_color = ft.Colors.ORANGE
+                                else:
+                                    progress_color = ft.Colors.GREEN
+                                    
+                                subscription_text = f"快速回應: {premium_usage}/{max_premium_usage}"
+                            else:
+                                print(f"警告: 帳號 {email} 的用量資訊中缺少必要欄位")
+                                subscription_text = "快速回應: 0/50"
+                                usage_percent = 0
+                        except Exception as e:
+                            print(f"處理帳號 {email} 用量資訊時出錯: {str(e)}")
+                            traceback.print_exc()
+                    else:
+                        # 沒有用量資訊時提供默認值
+                        has_usage_info = False
+                        subscription_text = "快速回應: 0/50"
+                        usage_percent = 0
+                    
+                    # 建立帳號卡片
                     account_card = ft.Card(
                         content=ft.Container(
                             content=ft.Column([
                                 ft.Row([
-                                    ft.Icon(ft.Icons.EMAIL, color=ft.Colors.BLUE, size=16),
-                                    ft.Text(email, overflow=ft.TextOverflow.ELLIPSIS, width=200),
+                                    ft.Text(
+                                        email,
+                                        weight=ft.FontWeight.BOLD, 
+                                        size=16,
+                                        color=ft.Colors.BLUE_700 if is_current else None,
+                                        selectable=True,  # 使郵箱可以選擇
+                                    ),
                                     ft.IconButton(
-                                        icon=ft.Icons.CONTENT_COPY, 
-                                        tooltip="複製郵箱", 
+                                        icon=ft.Icons.CONTENT_COPY,
+                                        tooltip="複製郵箱",
                                         icon_size=16,
                                         on_click=lambda e, em=email: copy_to_clipboard(em, "郵箱")
                                     ),
+                                    ft.Text("(當前使用中)", size=12, color=ft.Colors.GREEN_700) if is_current else ft.Container(),
                                 ]),
+                                
+                                # 添加可複製的密碼區域
                                 ft.Row([
-                                    ft.Icon(ft.Icons.LOCK, color=ft.Colors.GREY, size=16),
-                                    ft.TextField(value=password, password=True, can_reveal_password=True, 
-                                               height=40, dense=True, width=200),
+                                    ft.Text("密碼:", weight=ft.FontWeight.BOLD, size=14),
+                                    ft.TextField(
+                                        value=password if password else "無密碼",
+                                        read_only=True,
+                                        password=True,
+                                        can_reveal_password=True,
+                                        border=ft.InputBorder.NONE,
+                                        height=40,
+                                        width=150,
+                                        text_size=14,
+                                        content_padding=ft.padding.only(top=4),
+                                    ),
                                     ft.IconButton(
-                                        icon=ft.Icons.CONTENT_COPY, 
-                                        tooltip="複製密碼", 
+                                        icon=ft.Icons.CONTENT_COPY,
+                                        tooltip="複製密碼",
                                         icon_size=16,
                                         on_click=lambda e, pw=password: copy_to_clipboard(pw, "密碼")
                                     ),
                                 ]),
-                                ft.Row([
-                                    ft.Icon(ft.Icons.CALENDAR_TODAY, color=ft.Colors.GREY, size=16),
-                                    ft.Text(f"創建時間: {created_time}", size=10, color=ft.Colors.GREY),
-                                ]),
+                                
+                                ft.Text(f"訂閱類型: {status_text}", size=14),
+                                
+                                # 添加快速回應用量顯示以及進度條
+                                ft.Text(subscription_text, size=14),
+                                
+                                # 始終顯示進度條，但根據是否有用量資訊決定顯示方式
+                                ft.ProgressBar(
+                                    width=200, 
+                                    value=usage_percent if has_usage_info else 0,
+                                    color=progress_color if has_usage_info else ft.Colors.GREY_500,
+                                    bgcolor=ft.Colors.GREY_300,
+                                    height=5
+                                ),
+                                
+                                ft.Text(f"創建時間: {created_at}", size=12, color=ft.Colors.GREY_700),
+                                
                                 ft.Row([
                                     ft.IconButton(
                                         icon=ft.Icons.LOGIN, 
@@ -457,7 +599,12 @@ def main(page: ft.Page):
                                     ft.IconButton(
                                         icon=ft.Icons.INFO, 
                                         tooltip="帳號詳情",
-                                        on_click=lambda e, acc=account: show_account_details(acc)
+                                        on_click=lambda e, acc=account.copy(): show_account_details(acc)
+                                    ),
+                                    ft.IconButton(
+                                        icon=ft.Icons.REFRESH, 
+                                        tooltip="刷新帳號資訊",
+                                        on_click=lambda e, em=email: refresh_account_info(em)
                                     ),
                                 ], alignment=ft.MainAxisAlignment.END),
                             ]),
@@ -501,194 +648,481 @@ def main(page: ft.Page):
         except Exception as e:
             print(f"refresh_account_list: Unexpected error during account_list.update(): {str(e)}")
     
-    # 新增帳號詳情對話框
-    def show_account_details(account):
-        def close_dlg(e):
-            details_dialog.open = False
+    # 新增刷新單個帳號資訊的功能
+    def refresh_account_info(email):
+        try:
+            # 找到帳號
+            account = accounts_manager.get_account(email)
+            if not account:
+                print(f"找不到帳號: {email}")
+                return
+            
+            # 獲取令牌
+            access_token = account.get('access_token')
+            if not access_token:
+                print(f"帳號 {email} 沒有有效的訪問令牌")
+                page.overlay.append(ft.SnackBar(ft.Text(f"帳號 {email} 沒有有效的訪問令牌"), open=True))
+                page.update()
+                return
+            
+            # 顯示正在刷新的提示
+            page.overlay.append(ft.SnackBar(
+                ft.Row([
+                    ft.ProgressRing(width=16, height=16, stroke_width=2),
+                    ft.Text(f"正在刷新帳號 {email} 的資訊...")
+                ]),
+                open=True
+            ))
             page.update()
             
-        def copy_all_details(e):
-            # 生成完整詳情文本
-            full_details = f"郵箱: {account.get('email', '未知')}\n"
-            full_details += f"密碼: {account.get('password', '未知')}\n"
-            full_details += f"創建時間: {account.get('created_at', '未知')}\n"
-            full_details += f"更新時間: {account.get('updated_at', '未知')}\n"
-            
-            if 'account_status' in account:
-                full_details += f"帳號狀態: {account['account_status']}\n"
-            
-            if 'user' in account:
-                full_details += f"用戶ID: {account['user']}\n"
-            
-            # 訪問令牌
-            if 'access_token' in account:
-                full_details += f"訪問令牌: {account['access_token']}\n"
+            # 在背景執行獲取帳號詳情的任務
+            def update_account_info_task():
+                try:
+                    print(f"開始獲取帳號 {email} 的詳細資訊...")
+                    
+                    # 獲取使用情況 - 執行直接呼叫以便調試
+                    print(f"使用令牌尾碼 {access_token[-5:]} 獲取用量資訊...")
+                    usage_info = cursor_acc_info.UsageManager.get_usage(access_token)
+                    
+                    # 獲取訂閱信息
+                    print(f"使用令牌尾碼 {access_token[-5:]} 獲取訂閱資訊...")
+                    subscription_info = cursor_acc_info.UsageManager.get_stripe_profile(access_token)
+                    
+                    # 輸出為調試
+                    print(f"取得用量資訊: {usage_info}")
+                    print(f"取得訂閱資訊: {subscription_info}")
+                    
+                    # 確保 usage_info 有效
+                    if usage_info is None:
+                        print(f"警告: 帳號 {email} 獲取用量資訊失敗，使用默認值")
+                        usage_info = {"premium_usage": 0, "max_premium_usage": 50, "basic_usage": 0, "max_basic_usage": "無限"}
+                    
+                    # 更新帳號信息
+                    account['usage'] = usage_info
+                    
+                    if subscription_info:
+                        # 保存會員資訊
+                        account['membership'] = subscription_info
+                        account['account_status'] = cursor_acc_info.format_subscription_type(subscription_info)
+                    
+                    # 保存更新
+                    print(f"正在儲存帳號資訊...")
+                    accounts_manager._save_accounts()
+                    print(f"帳號資訊已成功儲存至 {accounts_manager.accounts_file}")
+                    
+                    # 在UI線程中更新界面
+                    def update_ui():
+                        try:
+                            # 刷新帳號列表顯示
+                            refresh_account_list()
+                            
+                            # 準備顯示用量資訊
+                            premium_usage = "0"
+                            max_premium_usage = "50"
+                            
+                            try:
+                                if usage_info and 'premium_usage' in usage_info:
+                                    premium_usage = str(usage_info.get('premium_usage', '0'))
+                                    max_premium_usage = str(usage_info.get('max_premium_usage', '50'))
+                                    print(f"在對話框中顯示快速回應用量: {premium_usage}/{max_premium_usage}")
+                            except Exception as ue:
+                                print(f"處理用量資訊時出錯: {ue}")
+                            
+                            # 計算進度條顏色和百分比
+                            try:
+                                usage_percent = float(premium_usage) / float(max_premium_usage) if float(max_premium_usage) > 0 else 0
+                                color_text = ft.Colors.GREEN
+                                if usage_percent > 0.8:
+                                    color_text = ft.Colors.RED
+                                elif usage_percent > 0.6:
+                                    color_text = ft.Colors.ORANGE
+                            except Exception as ce:
+                                print(f"計算用量百分比時出錯: {ce}")
+                                usage_percent = 0
+                                color_text = ft.Colors.GREEN
+                            
+                            # 顯示成功訊息
+                            success_dialog = ft.AlertDialog(
+                                title=ft.Row([
+                                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN),
+                                    ft.Text("帳號資訊已更新")
+                                ]),
+                                content=ft.Container(
+                                    content=ft.Column(
+                                        [
+                                            ft.Text(f"帳號: {email}", weight=ft.FontWeight.BOLD),
+                                            ft.Text(f"訂閱類型: {account.get('account_status', 'Free')}"),
+                                            ft.Row([
+                                                ft.Text(f"快速回應用量: {premium_usage}/{max_premium_usage}", color=color_text),
+                                                ft.IconButton(
+                                                    icon=ft.Icons.INFO,
+                                                    tooltip="查看詳情",
+                                                    on_click=lambda e, acc=account: show_account_details(acc)
+                                                )
+                                            ]),
+                                            # 顯示進度條
+                                            ft.ProgressBar(
+                                                width=300,
+                                                value=usage_percent,
+                                                color=color_text,
+                                                bgcolor=ft.Colors.GREY_300,
+                                                height=8
+                                            )
+                                        ],
+                                        spacing=10,
+                                    ),
+                                    padding=ft.padding.all(20),
+                                ),
+                                actions=[
+                                    ft.TextButton("確定", on_click=lambda e, dlg=None: close_success_dialog(e, success_dialog)),
+                                ],
+                                actions_alignment=ft.MainAxisAlignment.END
+                            )
+                            
+                            def close_success_dialog(e, dialog):
+                                page.dialog = dialog
+                                dialog.open = False
+                                page.update()
+                            
+                            page.dialog = success_dialog
+                            success_dialog.open = True
+                            page.update()
+                            
+                        except Exception as ui_ex:
+                            print(f"更新UI時出錯: {str(ui_ex)}")
+                            traceback.print_exc()
+                    
+                    def show_error():
+                        # 顯示錯誤訊息
+                        page.overlay.append(ft.SnackBar(ft.Text(f"獲取帳號資訊失敗"), open=True))
+                        page.update()
+                    
+                    if _app_is_closing:
+                        print("refresh_account_info: App is closing, skipping UI updates.")
+                        return
+                    
+                    # 確保在UI線程中更新界面
+                    try:
+                        # 嘗試使用不同的方法在UI線程中安全執行更新
+                        if hasattr(page, 'run_thread_safe'):
+                            # 方法1: 使用 run_thread_safe (如果存在)
+                            page.run_thread_safe(update_ui)
+                        elif hasattr(page, 'add_to_control_event_queue'):
+                            # 方法2: 使用 add_to_control_event_queue (如果存在)
+                            page.add_to_control_event_queue(update_ui)
+                        else:
+                            # 方法3: 直接在這個線程中更新UI (作為最後手段)
+                            print("警告: 無法使用安全的UI更新方法，直接更新可能不穩定")
+                            update_ui()
+                    except Exception as run_thread_ex:
+                        print(f"排程UI更新時出錯: {str(run_thread_ex)}")
+                        traceback.print_exc()
+                        try:
+                            # 仍然嘗試更新UI
+                            update_ui()
+                        except Exception as direct_ex:
+                            print(f"直接更新UI時出錯: {str(direct_ex)}")
                 
-            # 刷新令牌
-            if 'refresh_token' in account:
-                full_details += f"刷新令牌: {account['refresh_token']}\n"
+                except Exception as e:
+                    print(f"獲取帳號 {email} 詳細資訊時出錯: {str(e)}")
+                    traceback.print_exc()
+                    if not _app_is_closing:
+                        try:
+                            # 嘗試使用不同的方法在UI線程中顯示錯誤
+                            if hasattr(page, 'run_thread_safe'):
+                                page.run_thread_safe(show_error)
+                            elif hasattr(page, 'add_to_control_event_queue'):
+                                page.add_to_control_event_queue(show_error)
+                            else:
+                                show_error()
+                        except Exception:
+                            pass
             
-            copy_to_clipboard(full_details, "完整帳號詳情")
-        
-        # 格式化帳號詳情為可交互式控件
-        details_column = ft.Column(
-            controls=[
-                # 郵箱欄位
-                ft.Row([
-                    ft.Text("郵箱: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account.get('email', '未知'), selectable=True),
-                    ft.IconButton(
-                        icon=ft.Icons.COPY,
-                        tooltip="複製郵箱",
-                        icon_size=16,
-                        on_click=lambda e, email=account.get('email', '未知'): copy_to_clipboard(email, "郵箱")
-                    )
-                ]),
-                
-                # 密碼欄位
-                ft.Row([
-                    ft.Text("密碼: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account.get('password', '未知'), selectable=True),
-                    ft.IconButton(
-                        icon=ft.Icons.COPY,
-                        tooltip="複製密碼",
-                        icon_size=16,
-                        on_click=lambda e, pwd=account.get('password', '未知'): copy_to_clipboard(pwd, "密碼")
-                    )
-                ]),
-                
-                # 創建時間
-                ft.Row([
-                    ft.Text("創建時間: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account.get('created_at', '未知'), selectable=True)
-                ]),
-                
-                # 更新時間
-                ft.Row([
-                    ft.Text("更新時間: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account.get('updated_at', '未知'), selectable=True)
-                ]),
-            ],
-            spacing=10
-        )
-        
-        # 添加帳號狀態
-        if 'account_status' in account:
-            details_column.controls.append(
-                ft.Row([
-                    ft.Text("帳號狀態: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account['account_status'], selectable=True)
-                ])
-            )
-        
-        # 添加用戶ID
-        if 'user' in account:
-            details_column.controls.append(
-                ft.Row([
-                    ft.Text("用戶ID: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(account['user'], selectable=True),
-                    ft.IconButton(
-                        icon=ft.Icons.COPY,
-                        tooltip="複製用戶ID",
-                        icon_size=16,
-                        on_click=lambda e, uid=account['user']: copy_to_clipboard(uid, "用戶ID")
-                    )
-                ])
-            )
-        
-        # 添加訪問令牌
-        if 'access_token' in account:
-            token = account['access_token']
-            display_token = token if len(token) <= 20 else f"{token[:10]}...{token[-10:]}"
-            details_column.controls.append(
-                ft.Row([
-                    ft.Text("訪問令牌: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(display_token, selectable=True),
-                    ft.IconButton(
-                        icon=ft.Icons.COPY,
-                        tooltip="複製訪問令牌",
-                        icon_size=16,
-                        on_click=lambda e, tk=token: copy_to_clipboard(tk, "訪問令牌")
-                    )
-                ])
-            )
-        
-        # 添加刷新令牌
-        if 'refresh_token' in account:
-            token = account['refresh_token']
-            display_token = token if len(token) <= 20 else f"{token[:10]}...{token[-10:]}"
-            details_column.controls.append(
-                ft.Row([
-                    ft.Text("刷新令牌: ", weight=ft.FontWeight.BOLD), 
-                    ft.Text(display_token, selectable=True),
-                    ft.IconButton(
-                        icon=ft.Icons.COPY,
-                        tooltip="複製刷新令牌",
-                        icon_size=16,
-                        on_click=lambda e, tk=token: copy_to_clipboard(tk, "刷新令牌")
-                    )
-                ])
-            )
-        
-        # 添加會員資訊
-        if 'membership' in account and isinstance(account['membership'], dict):
-            membership_col = ft.Column(
-                controls=[ft.Text("會員資訊:", weight=ft.FontWeight.BOLD)],
-                spacing=5
-            )
+            # 在背景執行任務
+            threading.Thread(target=update_account_info_task, daemon=True).start()
             
-            for key, value in account['membership'].items():
-                membership_col.controls.append(
-                    ft.Text(f"  {key}: {value}", selectable=True)
-                )
+        except Exception as e:
+            print(f"刷新帳號資訊時出錯: {str(e)}")
+            traceback.print_exc()
+            page.overlay.append(ft.SnackBar(ft.Text(f"刷新帳號資訊時出錯: {str(e)}"), open=True))
+            page.update()
+    
+    # 新增帳號詳情對話框
+    def show_account_details(account):
+        try:
+            print(f"顯示帳號詳情：{account.get('email', '未知')}")
             
-            details_column.controls.append(membership_col)
-        
-        # 添加使用情況
-        if 'usage' in account and isinstance(account['usage'], dict):
-            usage_col = ft.Column(
-                controls=[ft.Text("使用情況:", weight=ft.FontWeight.BOLD)],
-                spacing=5
-            )
+            def close_dlg(e):
+                try:
+                    print("關閉帳號詳情對話框")
+                    # 先設置 open=False
+                    details_dialog.open = False
+                    # 使用 update 刷新對話框狀態
+                    page.update()
+                    # 延遲一小段時間後再移除對話框，避免並發問題
+                    def remove_dialog():
+                        try:
+                            # 檢查是否已經關閉應用程式
+                            global _app_is_closing
+                            if _app_is_closing:
+                                return
+                            # 確保安全移除對話框
+                            if details_dialog in page.overlay:
+                                page.overlay.remove(details_dialog)
+                            page.update()
+                            print("對話框已成功移除")
+                        except Exception as remove_err:
+                            print(f"移除對話框時出錯: {str(remove_err)}")
+                            traceback.print_exc()
+                    
+                    # 使用短暫延遲避免並發問題
+                    threading.Timer(0.2, remove_dialog).start()
+                except Exception as close_err:
+                    print(f"關閉對話框時出錯: {str(close_err)}")
+                    traceback.print_exc()
             
-            for key, value in account['usage'].items():
-                usage_col.controls.append(
-                    ft.Text(f"  {key}: {value}", selectable=True)
-                )
+            def copy_all_details(e):
+                try:
+                    print("複製全部帳號資訊")
+                    # 生成完整詳情文本
+                    details_text = f"帳號: {account.get('email', '')}\n"
+                    details_text += f"密碼: {account.get('password', '')}\n"
+                    details_text += f"創建時間: {account.get('created_at', '')}\n"
+                    details_text += f"更新時間: {account.get('updated_at', '')}\n"
+                    
+                    # 會員資訊
+                    if account.get('membership') and isinstance(account['membership'], dict):
+                        membership = account['membership']
+                        details_text += f"會員類型: {account.get('account_status', 'Free')}\n"
+                        
+                        # 顯示更多會員詳情
+                        if 'status' in membership:
+                            details_text += f"會員狀態: {membership['status']}\n"
+                        if 'expiresAt' in membership:
+                            details_text += f"到期時間: {membership['expiresAt']}\n"
+                    else:
+                        details_text += f"會員類型: {account.get('account_status', 'Free')}\n"
+                    
+                    # 使用資訊
+                    if account.get('usage') and isinstance(account['usage'], dict):
+                        usage = account['usage']
+                        details_text += f"快速回應用量: {usage.get('premium_usage', '0')}/{usage.get('max_premium_usage', '無限')}\n"
+                        details_text += f"基本回應用量: {usage.get('basic_usage', '0')}/{usage.get('max_basic_usage', '無限')}\n"
+                    
+                    # 令牌資訊
+                    if account.get('access_token'):
+                        details_text += f"訪問令牌: {account.get('access_token', '')}\n"
+                    if account.get('refresh_token'):
+                        details_text += f"刷新令牌: {account.get('refresh_token', '')}\n"
+                    
+                    # 複製到剪貼板
+                    page.set_clipboard(details_text)
+                    page.overlay.append(ft.SnackBar(ft.Text("已複製完整帳號資訊到剪貼板"), open=True))
+                    page.update()
+                except Exception as copy_err:
+                    print(f"複製帳號資訊時出錯: {str(copy_err)}")
+                    traceback.print_exc()
             
-            details_column.controls.append(usage_col)
-        
-        details_dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Row([
-                ft.Text(f"帳號詳情: {account.get('email', '未知')}"),
+            def refresh_account_details(e):
+                try:
+                    print("刷新帳號詳情")
+                    # 先關閉對話框
+                    details_dialog.open = False
+                    page.update()
+                    
+                    # 使用延遲確保對話框正確關閉後再執行刷新
+                    def do_refresh():
+                        try:
+                            # 檢查是否已經關閉應用程式
+                            global _app_is_closing
+                            if _app_is_closing:
+                                return
+                            # 安全移除對話框
+                            if details_dialog in page.overlay:
+                                page.overlay.remove(details_dialog)
+                            page.update()
+                            print("對話框已移除，開始刷新帳號資訊")
+                            # 刷新帳號資訊
+                            refresh_account_info(account.get('email', ''))
+                        except Exception as do_refresh_err:
+                            print(f"執行刷新操作時出錯: {str(do_refresh_err)}")
+                            traceback.print_exc()
+                            # 顯示錯誤提示
+                            page.overlay.append(ft.SnackBar(ft.Text(f"刷新資訊時出錯: {str(do_refresh_err)}"), open=True))
+                            page.update()
+                    
+                    # 使用短暫延遲避免並發問題
+                    threading.Timer(0.2, do_refresh).start()
+                except Exception as refresh_err:
+                    print(f"刷新帳號詳情時出錯: {str(refresh_err)}")
+                    traceback.print_exc()
+            
+            # 準備顯示的控件列表
+            print("準備帳號詳情控件...")
+            content_controls = []
+            
+            # 郵箱和密碼行
+            content_controls.append(ft.Row([
+                ft.Text("帳號:", weight=ft.FontWeight.BOLD),
+                ft.Text(account.get('email', ''), selectable=True),
                 ft.IconButton(
-                    icon=ft.Icons.COPY_ALL,
-                    tooltip="複製全部詳情",
-                    on_click=copy_all_details
+                    icon=ft.Icons.CONTENT_COPY,
+                    tooltip="複製郵箱",
+                    on_click=lambda e, em=account.get('email', ''): copy_to_clipboard(em, "郵箱")
                 )
-            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            content=ft.Container(
-                content=ft.Column(
-                    [details_column],
-                    scroll=ft.ScrollMode.AUTO
+            ]))
+            
+            content_controls.append(ft.Row([
+                ft.Text("密碼:", weight=ft.FontWeight.BOLD),
+                ft.TextField(
+                    value=account.get('password', ''),
+                    read_only=True,
+                    password=True,
+                    can_reveal_password=True,
+                    border=ft.InputBorder.NONE,
+                    height=40,
+                    width=220,
+                    text_size=14,
+                    content_padding=ft.padding.only(top=4),
                 ),
-                width=500,
-                height=400,
+                ft.IconButton(
+                    icon=ft.Icons.CONTENT_COPY,
+                    tooltip="複製密碼",
+                    on_click=lambda e, pw=account.get('password', ''): copy_to_clipboard(pw, "密碼")
+                )
+            ]))
+            
+            # 會員資訊區塊
+            membership_section = []
+            membership_section.append(ft.Text("會員資訊", size=16, weight=ft.FontWeight.BOLD))
+            
+            # 訂閱類型（帶顏色指示）
+            subscription_type = account.get('account_status', 'Free')
+            subscription_color = ft.Colors.GREEN if 'Pro' in subscription_type else ft.Colors.GREY
+            membership_section.append(ft.Row([
+                ft.Icon(ft.Icons.CARD_MEMBERSHIP, color=subscription_color),
+                ft.Text(f"訂閱類型: {subscription_type}", color=subscription_color),
+            ]))
+            
+            # 更多會員詳情（如果有）
+            if account.get('membership') and isinstance(account['membership'], dict):
+                membership = account['membership']
+                if 'status' in membership:
+                    membership_section.append(ft.Text(f"會員狀態: {membership['status']}"))
+                if 'expiresAt' in membership:
+                    membership_section.append(ft.Text(f"到期時間: {membership['expiresAt']}"))
+            
+            content_controls.append(ft.Container(
+                content=ft.Column(membership_section),
                 padding=10,
                 border=ft.border.all(1, ft.Colors.GREY_300),
-                border_radius=5
-            ),
-            actions=[
-                ft.TextButton("關閉", on_click=close_dlg),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-            open=True
-        )
-        
-        page.overlay.append(details_dialog)
-        page.update()
-        
+                border_radius=5,
+                margin=ft.margin.only(top=10, bottom=10)
+            ))
+            
+            # 使用資訊區塊（如果有）
+            if account.get('usage') and isinstance(account['usage'], dict):
+                usage_section = []
+                usage_section.append(ft.Text("使用情況", size=16, weight=ft.FontWeight.BOLD))
+                
+                usage = account['usage']
+                
+                # 快速回應用量 - 使用進度條顯示
+                if 'premium_usage' in usage and 'max_premium_usage' in usage:
+                    premium_usage = int(usage.get('premium_usage', 0))
+                    max_premium_usage = int(usage.get('max_premium_usage', 50))
+                    
+                    # 防止除零錯誤
+                    if max_premium_usage <= 0:
+                        max_premium_usage = 100
+                    
+                    # 計算使用比例
+                    usage_percent = min(premium_usage / max_premium_usage, 1.0)
+                    
+                    # 根據使用百分比決定顏色
+                    progress_color = ft.Colors.GREEN
+                    if usage_percent > 0.8:
+                        progress_color = ft.Colors.RED
+                    elif usage_percent > 0.6:
+                        progress_color = ft.Colors.ORANGE
+                    
+                    usage_section.append(ft.Text(f"快速回應用量:"))
+                    usage_section.append(
+                        ft.Row([
+                            ft.ProgressBar(
+                                width=250,
+                                value=usage_percent,
+                                color=progress_color,
+                                bgcolor=ft.Colors.GREY_300,
+                            ),
+                            ft.Text(f"{premium_usage}/{max_premium_usage}", color=progress_color),
+                        ])
+                    )
+                
+                # 基本回應用量 - 通常為無限
+                if 'basic_usage' in usage:
+                    basic_usage = usage.get('basic_usage', 0)
+                    max_basic_usage = usage.get('max_basic_usage', '無限')
+                    usage_section.append(ft.Text(f"基本回應用量: {basic_usage}/{max_basic_usage}"))
+                
+                content_controls.append(ft.Container(
+                    content=ft.Column(usage_section),
+                    padding=10,
+                    border=ft.border.all(1, ft.Colors.GREY_300),
+                    border_radius=5,
+                    margin=ft.margin.only(top=10, bottom=10)
+                ))
+            
+            # 時間資訊
+            time_section = []
+            time_section.append(ft.Text("時間資訊", size=16, weight=ft.FontWeight.BOLD))
+            time_section.append(ft.Text(f"創建時間: {account.get('created_at', '未知')}"))
+            time_section.append(ft.Text(f"更新時間: {account.get('updated_at', '未知')}"))
+            
+            content_controls.append(ft.Container(
+                content=ft.Column(time_section),
+                padding=10,
+                border=ft.border.all(1, ft.Colors.GREY_300),
+                border_radius=5,
+                margin=ft.margin.only(top=10, bottom=10)
+            ))
+            
+            print("創建帳號詳情對話框...")
+            details_dialog = ft.AlertDialog(
+                title=ft.Text("帳號詳情"),
+                content=ft.Container(
+                    content=ft.Column(
+                        content_controls,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    width=400,
+                    height=500,
+                    padding=10,
+                ),
+                actions=[
+                    ft.TextButton("關閉", on_click=close_dlg),
+                    ft.TextButton("複製全部", on_click=copy_all_details),
+                    ft.TextButton("刷新資訊", on_click=refresh_account_details),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            
+            print("設置和顯示對話框...")
+            # 修改為使用 overlay 而非 dialog 屬性
+            page.overlay.append(details_dialog)
+            details_dialog.open = True
+            page.update()
+            print("帳號詳情對話框已顯示")
+            
+        except Exception as e:
+            print(f"顯示帳號詳情時出錯: {str(e)}")
+            traceback.print_exc()
+            try:
+                page.overlay.append(ft.SnackBar(ft.Text(f"顯示帳號詳情時出錯: {str(e)}"), open=True))
+                page.update()
+            except Exception as snack_err:
+                print(f"顯示錯誤提示時出錯: {str(snack_err)}")
+
     # 新增帳號對話框
     def show_add_account_dialog(e):
         def close_dlg(e):
@@ -850,16 +1284,50 @@ def main(page: ft.Page):
                     for path in cursor_exe_paths:
                         if os.path.exists(path):
                             print(f"找到 Cursor.exe 於: {path}")
-                            subprocess.Popen([path])
-                            print(f"已嘗試從 {path} 啟動 Cursor。")
-                            page.overlay.append(ft.SnackBar(ft.Text(f"已嘗試從 {path} 啟動 Cursor。"), open=True, duration=5000))
-                            cursor_started = True
-                            break
+                            
+                            # 使用更穩定的方式啟動 Cursor
+                            try:
+                                # 在 Windows 上使用特定標誌啟動 Cursor
+                                if os.name == 'nt':
+                                    # 創建啟動信息對象以隱藏命令提示符
+                                    startup_info = subprocess.STARTUPINFO()
+                                    startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                                    startup_info.wShowWindow = 0  # SW_HIDE
+                                    
+                                    # 啟動 Cursor 並分離進程
+                                    proc = subprocess.Popen(
+                                        [path],
+                                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                                        close_fds=True,
+                                        startupinfo=startup_info
+                                    )
+                                else:  # Unix/Linux/Mac
+                                    proc = subprocess.Popen(
+                                        [path],
+                                        start_new_session=True,
+                                        close_fds=True
+                                    )
+                                
+                                print(f"已從 {path} 成功啟動 Cursor (PID: {proc.pid})。")
+                                page.overlay.append(ft.SnackBar(ft.Text(f"已從 {path} 啟動 Cursor，請等待它啟動。"), open=True, duration=5000))
+                                cursor_started = True
+                                break
+                            except Exception as popen_ex:
+                                print(f"使用增強方式啟動 Cursor 時出錯: {str(popen_ex)}")
+                                
+                                # 回退到基本啟動方式
+                                try:
+                                    subprocess.Popen([path])
+                                    print(f"已嘗試使用基本方式從 {path} 啟動 Cursor。")
+                                    page.overlay.append(ft.SnackBar(ft.Text(f"使用基本方式啟動 Cursor。"), open=True, duration=5000))
+                                    cursor_started = True
+                                    break
+                                except Exception as basic_ex:
+                                    print(f"使用基本方式啟動 Cursor 時出錯: {str(basic_ex)}")
                     
                     if not cursor_started:
                         print("錯誤: 找不到 Cursor.exe。請手動啟動 Cursor。")
                         page.overlay.append(ft.SnackBar(ft.Text("找不到 Cursor.exe，請手動啟動。"), open=True))
-                        
                 except Exception as start_error:
                     print(f"啟動 Cursor 時出錯: {str(start_error)}")
                     page.overlay.append(ft.SnackBar(ft.Text(f"啟動 Cursor 時出錯: {str(start_error)}"), open=True))
@@ -937,7 +1405,7 @@ def main(page: ft.Page):
     
     # 刷新帳號清單和顯示當前帳號
     def refresh_current_account():
-        global _app_is_closing # <--- 訪問全局標誌
+        global _app_is_closing, current_account_email, accounts_manager # <--- 添加 accounts_manager
         if _app_is_closing:
             print("refresh_current_account: App is closing, skipping UI updates.")
             return
@@ -949,6 +1417,9 @@ def main(page: ft.Page):
                 email = current_auth['email']
                 current_account_text.value = f"當前帳號: {email}"
                 print(f"當前使用帳號: {email}")
+                
+                # 更新全局變數
+                current_account_email = email
                 
                 # 嘗試從 AccountsManager 中獲取密碼
                 account_info = accounts_manager.get_account(email)
@@ -1316,7 +1787,42 @@ def main(page: ft.Page):
                     
                     if result:
                         print("自動註冊流程成功完成！")
-                        page.overlay.append(ft.SnackBar(ft.Text("註冊成功，帳號已儲存！"), open=True))
+                        
+                        # 詢問是否重啟應用程式
+                        def show_restart_confirm():
+                            restart_dialog = ft.AlertDialog(
+                                title=ft.Row([
+                                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN),
+                                    ft.Text("註冊成功", color=ft.Colors.GREEN)
+                                ]),
+                                content=ft.Text("註冊成功，帳號已儲存！是否要重新啟動應用程式以更新帳號列表？"),
+                                actions=[
+                                    ft.TextButton("否", on_click=lambda e: close_restart_dialog(e, restart_dialog, False)),
+                                    ft.TextButton("是", on_click=lambda e: close_restart_dialog(e, restart_dialog, True))
+                                ],
+                                actions_alignment=ft.MainAxisAlignment.END,
+                                open=True
+                            )
+                            
+                            page.overlay.append(restart_dialog)
+                            page.update()
+                        
+                        def close_restart_dialog(e, dialog, should_restart):
+                            dialog.open = False
+                            page.update()
+                            
+                            if should_restart:
+                                # 在關閉對話框後重啟 GUI，顯示明確的提示
+                                page.overlay.append(ft.SnackBar(ft.Text("註冊成功，正在重啟應用..."), open=True))
+                                page.update()
+                                # 延遲一點時間讓提示訊息顯示出來
+                                threading.Timer(1.0, restart_gui_app).start()
+                            else:
+                                # 僅刷新帳號列表
+                                refresh_account_list()
+                                page.overlay.append(ft.SnackBar(ft.Text("註冊成功，帳號已儲存！"), open=True))
+                        
+                        page.run_thread_safe(show_restart_confirm)
                     else:
                         print("自動註冊流程未能成功完成。")
                         page.overlay.append(ft.SnackBar(ft.Text("註冊失敗，請查看日誌了解詳情。"), open=True))
@@ -1333,9 +1839,6 @@ def main(page: ft.Page):
                     auto_register_button.update()
                     stop_auto_register_button.update()
                     page.update()
-                    
-                    # 刷新帳號列表
-                    refresh_account_list()
                     
             # 啟動註冊線程
             thread = threading.Thread(target=run_registration)
@@ -1809,9 +2312,56 @@ def main(page: ft.Page):
                 f.write("\n".join(updated_lines))
             
             print(f".env 檔案已儲存。")
-            page.overlay.append(ft.SnackBar(ft.Text(".env 已儲存!"), open=True))
+            
+            # 詢問是否重啟應用程式來套用設定
+            def show_restart_confirm():
+                restart_dialog = ft.AlertDialog(
+                    title=ft.Row([
+                        ft.Icon(ft.Icons.SAVE, color=ft.Colors.GREEN),
+                        ft.Text("設定已儲存", color=ft.Colors.GREEN)
+                    ]),
+                    content=ft.Column([
+                        ft.Text("設定已成功儲存！某些設定可能需要重新啟動應用程式才能生效。"),
+                        ft.Text("是否要立即重新啟動？", weight=ft.FontWeight.BOLD)
+                    ]),
+                    actions=[
+                        ft.TextButton("否", on_click=lambda e: close_restart_dialog(e, restart_dialog, False)),
+                        ft.ElevatedButton(
+                            "是，立即重啟",
+                            icon=ft.Icons.REFRESH,
+                            on_click=lambda e: close_restart_dialog(e, restart_dialog, True),
+                            style=ft.ButtonStyle(
+                                color=ft.Colors.WHITE,
+                                bgcolor=ft.Colors.BLUE
+                            )
+                        )
+                    ],
+                    actions_alignment=ft.MainAxisAlignment.END,
+                    open=True
+                )
+                
+                page.overlay.append(restart_dialog)
+                page.update()
+            
+            def close_restart_dialog(e, dialog, should_restart):
+                dialog.open = False
+                page.update()
+                
+                if should_restart:
+                    # 在關閉對話框後重啟 GUI，顯示明確的提示
+                    page.overlay.append(ft.SnackBar(ft.Text("設定已儲存，正在重啟應用...", weight=ft.FontWeight.BOLD), open=True))
+                    page.update()
+                    # 延遲一點時間讓提示訊息顯示出來，並確保環境變數能被正確寫入並刷新
+                    threading.Timer(1.5, restart_gui_app).start()
+                else:
+                    # 只顯示已儲存訊息
+                    page.overlay.append(ft.SnackBar(ft.Text(".env 已儲存，但須重啟應用才能生效！"), open=True))
+            
+            show_restart_confirm()
+            
         except Exception as ex:
             print(f"儲存 .env 失敗: {str(ex)}")
+            traceback.print_exc()
             page.overlay.append(ft.SnackBar(ft.Text(f"儲存 .env 失敗: {str(ex)}"), open=True))
         page.update()
 
@@ -1990,6 +2540,12 @@ def main(page: ft.Page):
                 ft.Text("更新日誌", size=30, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER),
                 ft.Divider(),
                 ft.Container(height=10),
+                ft.Text("版本 1.0.2 (2025年5月21日)", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text("  - 新增了訂閱類型和用量資訊顯示。", size=16),
+                ft.Text("  - 添加了刷新帳號資訊功能按鈕。", size=16),
+                ft.Text("  - 增強了帳號詳情對話框，添加進度條顯示用量情況。", size=16),
+                ft.Text("  - 新增了自動重啟應用程式的功能。", size=16),
+                ft.Container(height=20),
                 ft.Text("版本 1.0.1 (2025年5月20日)", size=20, weight=ft.FontWeight.BOLD),
                 ft.Text("  - 更新了「關於」頁面中的版本號和日期。", size=16),
                 ft.Text("  - 修復了應用程式關閉時可能發生的事件迴圈錯誤。", size=16),
@@ -2043,8 +2599,8 @@ def main(page: ft.Page):
                     ft.Image(src="/YuCursor.png", width=50, height=50, fit=ft.ImageFit.CONTAIN),
                     ft.Column([
                         ft.Text("YuCursor", size=24, weight=ft.FontWeight.BOLD),
-                        ft.Text("版本 1.0.1", size=16),
-                        ft.Text("發布日期：2025年5月20日", size=16)
+                        ft.Text("版本 1.0.2", size=16),
+                        ft.Text("發布日期：2025年5月21日", size=16)
                     ])
                 ], alignment=ft.MainAxisAlignment.CENTER),
                 ft.Container(height=20),
@@ -2068,29 +2624,7 @@ def main(page: ft.Page):
         )
     ], alignment=ft.MainAxisAlignment.START, expand=True, scroll=ft.ScrollMode.AUTO)
 
-# 創建更新日誌內容
-    changelog_content = ft.Column([
-        ft.Container(
-            content=ft.Column([
-                ft.Text("更新日誌", size=30, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER),
-                ft.Divider(),
-                ft.Container(height=10),
-                ft.Text("版本 1.0.1 (2025年5月20日)", size=20, weight=ft.FontWeight.BOLD),
-                ft.Text("  - 更新了「關於」頁面中的版本號和日期。", size=16),
-                ft.Text("  - 修復了應用程式關閉時可能發生的事件迴圈錯誤。", size=16),
-                ft.Container(height=20),
-                ft.Text("版本 1.0.0 (2025年5月19日)", size=20, weight=ft.FontWeight.BOLD),
-                ft.Text("  - 初始版本發布。", size=16),
-            ]),
-            padding=20,
-            border=ft.border.all(1, ft.Colors.GREY_300),
-            border_radius=10,
-            margin=20
-        )
-    ], alignment=ft.MainAxisAlignment.START, expand=True, scroll=ft.ScrollMode.AUTO)
-
-    
-# 添加標籤頁控件
+    # 添加標籤頁控件
     tabs = ft.Tabs(
         selected_index=0,  # 預設顯示主頁
         animation_duration=300,
@@ -2152,10 +2686,65 @@ def main(page: ft.Page):
     tabs.selected_index = 0
     tabs.update()
     
+    # 窗口居中顯示 - 使用正確的方法設置窗口位置
+    page.window.center()
+    
     # 初始化時刷新帳號列表和當前帳號，並載入設定
     refresh_account_list()
     refresh_current_account()
     load_env_to_gui()
+    
+    # 自動刷新所有帳號資訊
+    def auto_refresh_all_accounts():
+        try:
+            print("程式啟動，自動刷新所有帳號資訊...")
+            # 獲取所有帳號
+            all_accounts = accounts_manager.get_accounts()
+            if not all_accounts:
+                print("沒有帳號需要刷新")
+                return
+                
+            # 建立不重複的郵箱列表
+            unique_emails = set()
+            for account in all_accounts:
+                email = account.get('email')
+                if email and email not in unique_emails:
+                    unique_emails.add(email)
+            
+            # 計算需要刷新的帳號數量
+            total = len(unique_emails)
+            print(f"發現 {total} 個不重複帳號需要刷新")
+            
+            # 執行刷新任務
+            def refresh_task():
+                for i, email in enumerate(unique_emails):
+                    try:
+                        print(f"正在刷新帳號 {i+1}/{total}: {email}")
+                        refresh_account_info(email)
+                        # 每個帳號刷新後短暫延遲，避免過度頻繁的請求
+                        time.sleep(1.5)
+                    except Exception as e:
+                        print(f"刷新帳號 {email} 時出錯: {str(e)}")
+            
+            # 在背景執行刷新任務
+            threading.Thread(target=refresh_task, daemon=True).start()
+            
+            # 顯示提示
+            page.overlay.append(ft.SnackBar(
+                ft.Row([
+                    ft.ProgressRing(width=16, height=16, stroke_width=2),
+                    ft.Text(f"正在背景刷新 {total} 個帳號資訊...")
+                ]),
+                open=True
+            ))
+            page.update()
+            
+        except Exception as e:
+            print(f"自動刷新帳號時出錯: {str(e)}")
+            traceback.print_exc()
+    
+    # 延遲幾秒後執行刷新，確保UI已完全載入
+    threading.Timer(3.0, auto_refresh_all_accounts).start()
     
     # 顯示啟動提示視窗
     show_welcome_dialog()
@@ -2165,12 +2754,88 @@ def main(page: ft.Page):
         if e.data == "close":
             print("Window close event: Setting _app_is_closing to True.") # Debug log
             _app_is_closing = True
-            ui_log_handler.stop_redirect()
-            print("UI log handler stopped. Destroying window.") # Debug log
-            page.window_destroy()
-            print("Window destroyed.") # Debug log
+            if hasattr(page, "_ui_log_handler"):
+                try:
+                    page._ui_log_handler.stop_redirect()
+                    print("UI log handler stopped. Destroying window.") # Debug log
+                except Exception as ex:
+                    print(f"Error stopping UI log handler: {str(ex)}")
+            
+            # 確保窗口會立即關閉
+            try:
+                # 給一個短暫的延遲讓事件循環有時間處理最後的事件
+                def delayed_close():
+                    try:
+                        if hasattr(page, "window") and hasattr(page.window, "close"):
+                            page.window.close()
+                            print("Window closed using page.window.close().")
+                        else:
+                            print("Window closing method not available.")
+                    except Exception as close_ex:
+                        print(f"Error during window close: {str(close_ex)}")
+                
+                threading.Timer(0.1, delayed_close).start()
+            except Exception as ex:
+                print(f"Error setting up delayed window close: {str(ex)}")
+            
+            print("Window close event handled.") # Debug log
     
     page.on_window_event = on_window_event
+
+    # 定義檢查認證更新的函數
+    def check_auth_update():
+        try:
+            auth_flag_file = "auth_updated.flag"
+            if os.path.exists(auth_flag_file):
+                try:
+                    with open(auth_flag_file, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    
+                    # 讀取後刪除標記檔案
+                    os.remove(auth_flag_file)
+                    
+                    email = content.split(",")[1] if "," in content else "未知帳號"
+                    
+                    # 顯示重啟對話框
+                    restart_dialog = ft.AlertDialog(
+                        title=ft.Row([
+                            ft.Icon(ft.Icons.INFO, color=ft.Colors.BLUE),
+                            ft.Text("認證資訊已更新", color=ft.Colors.BLUE)
+                        ]),
+                        content=ft.Text(f"帳號 {email} 的認證資訊已更新！為確保所有功能正常運作，建議重新啟動應用程式。是否立即重新啟動？"),
+                        actions=[
+                            ft.TextButton("稍後", on_click=lambda e: close_restart_dialog(e, restart_dialog, False)),
+                            ft.TextButton("立即重啟", on_click=lambda e: close_restart_dialog(e, restart_dialog, True))
+                        ],
+                        actions_alignment=ft.MainAxisAlignment.END,
+                        open=True
+                    )
+                    
+                    def close_restart_dialog(e, dialog, should_restart):
+                        dialog.open = False
+                        page.update()
+                        
+                        if should_restart:
+                            # 在關閉對話框後重啟 GUI，顯示明確的提示
+                            page.overlay.append(ft.SnackBar(ft.Text("認證資訊已更新，正在重啟應用..."), open=True))
+                            page.update()
+                            # 延遲一點時間讓提示訊息顯示出來
+                            threading.Timer(1.0, restart_gui_app).start()
+                    
+                    page.overlay.append(restart_dialog)
+                    page.update()
+                except Exception as e:
+                    print(f"處理認證更新檔案時出錯: {str(e)}")
+        except Exception as e:
+            print(f"檢查認證更新時出錯: {str(e)}")
+    
+    # 啟動定時檢查認證更新 (每10秒檢查一次)
+    def start_auth_check_timer():
+        check_auth_update()  # 初次檢查
+        threading.Timer(10.0, start_auth_check_timer).start()
+    
+    # 啟動檢查
+    start_auth_check_timer()
 
 # 全局變數用於傳遞手動輸入的驗證碼
 manual_verification_code = None
@@ -2182,7 +2847,16 @@ def reload_accounts_manager():
     try:
         # 重載帳號管理器實例
         print("重新載入帳號管理器...")
-        from accounts_manager import AccountsManager
+        # 確保模組已導入
+        if 'AccountsManager' not in globals():
+            from accounts_manager import AccountsManager
+        else:
+            # 嘗試重新導入模組
+            import importlib
+            import accounts_manager
+            importlib.reload(accounts_manager)
+            from accounts_manager import AccountsManager
+            
         old_file_path = accounts_manager.accounts_file if accounts_manager else None
         
         # 創建新的實例
@@ -2220,11 +2894,18 @@ def reload_accounts_manager():
                     print(f"reload_accounts_manager: Unexpected error during UI update within run_thread_safe: {str(e)}")
             
             try:
-                _flet_page_instance.run_thread_safe(_update_ui_after_reload_safe)
+                # 嘗試使用 run_thread_safe 或 add_to_control_event_queue
+                if hasattr(_flet_page_instance, 'run_thread_safe'):
+                    _flet_page_instance.run_thread_safe(_update_ui_after_reload_safe)
+                elif hasattr(_flet_page_instance, 'add_to_control_event_queue'):
+                    _flet_page_instance.add_to_control_event_queue(_update_ui_after_reload_safe)
+                else:
+                    # 如果都不支持，直接調用
+                    _update_ui_after_reload_safe()
             except RuntimeError as e:
                 print(f"reload_accounts_manager: Failed to schedule UI updates (loop likely closed): {str(e)}")
             except Exception as e:
-                print(f"reload_accounts_manager: Error calling run_thread_safe: {str(e)}")
+                print(f"reload_accounts_manager: Error scheduling UI updates: {str(e)}")
         else:
             print(f"帳號管理器已重新載入，共載入 {len(accounts_manager.get_accounts())} 個帳號")
             print("注意: _flet_page_instance不存在，無法更新UI")
@@ -2236,22 +2917,230 @@ def reload_accounts_manager():
         traceback.print_exc()
         return False
 
+# 添加重啟 GUI 的函數
+def restart_gui_app():
+    global _app_is_closing
+    
+    try:
+        print("準備重啟 GUI 應用...")
+        
+        # 設置應用正在關閉的標誌
+        _app_is_closing = True
+        
+        # 獲取當前執行檔案的路徑
+        current_path = os.path.abspath(sys.argv[0])
+        
+        # 獲取 Python 解釋器路徑
+        python_exe = sys.executable
+        
+        # 創建重啟的命令，添加重啟標記參數
+        restart_command = [python_exe, current_path, "--restarted"]
+        
+        # 顯示重啟對話框
+        def show_restart_dialog():
+            restart_dialog = ft.AlertDialog(
+                title=ft.Row([
+                    ft.Icon(ft.Icons.REFRESH, color=ft.Colors.BLUE),
+                    ft.Text("應用正在重啟")
+                ]),
+                content=ft.Text("應用將在關閉後重新啟動..."),
+                open=True
+            )
+            _flet_page_instance.overlay.append(restart_dialog)
+            _flet_page_instance.update()
+            
+            # 延遲關閉窗口，確保對話框能夠顯示
+            threading.Timer(1.0, close_window_and_restart).start()
+        
+        # 關閉窗口並重啟
+        def close_window_and_restart():
+            try:
+                # 關閉 UI 日誌處理器
+                if _flet_page_instance and hasattr(_flet_page_instance, "_ui_log_handler"):
+                    _flet_page_instance._ui_log_handler.stop_redirect()
+                    print("UI 日誌處理器已停止重定向")
+                
+                # 先嘗試正常關閉窗口
+                if _flet_page_instance:
+                    try:
+                        print("正在關閉應用視窗...")
+                        
+                        # 標記窗口將要關閉
+                        _app_is_closing = True
+                        
+                        # 嘗試不同的窗口關閉方法
+                        if hasattr(_flet_page_instance, "window") and hasattr(_flet_page_instance.window, "close"):
+                            try:
+                                # 方法 1: 使用 page.window.close()
+                                _flet_page_instance.window.close()
+                                print("使用 page.window.close() 關閉窗口")
+                            except Exception as e1:
+                                print(f"page.window.close() 失敗: {e1}")
+                        else:
+                            print("page.window.close() 方法不存在")
+                        
+                        # 給窗口一點時間關閉
+                        time.sleep(0.5)
+                    except Exception as window_ex:
+                        print(f"關閉視窗時出錯: {str(window_ex)}")
+                
+                # 啟動新進程
+                try:
+                    # Windows 系統使用特殊方式啟動
+                    if os.name == 'nt':
+                        # 使用 shell=True 方式啟動，確保引號處理正確
+                        # 添加 /b 參數啟動後台進程，避免開啟新控制台
+                        cmd = f'cmd /c start /b "YuCursor" "{python_exe}" "{current_path}" --restarted'
+                        print(f"使用 shell 命令: {cmd}")
+                        os.system(cmd)  # 改用 os.system 以避免複雜的引號處理問題
+                    else:
+                        # Unix 系統使用標準方式啟動
+                        print(f"使用標準方式啟動: {restart_command}")
+                        subprocess.Popen(
+                            restart_command,
+                            start_new_session=True,
+                            close_fds=True
+                        )
+                    
+                    print("已啟動新進程")
+                except Exception as e:
+                    print(f"啟動新進程失敗: {str(e)}")
+                    traceback.print_exc()
+                
+                # 延遲退出，給新進程一些時間完全啟動
+                time.sleep(1.0)
+                
+                # 強制終止此進程
+                print("正在終止當前進程...")
+                sys.exit(0)
+                
+            except Exception as e:
+                print(f"關閉窗口並重啟時出錯: {str(e)}")
+                traceback.print_exc()
+                # 如果失敗，仍然嘗試強制退出
+                os._exit(0)
+        
+        # 如果頁面實例存在，顯示對話框
+        if _flet_page_instance:
+            try:
+                # 嘗試使用 run_thread_safe 或 add_to_control_event_queue
+                if hasattr(_flet_page_instance, 'run_thread_safe'):
+                    _flet_page_instance.run_thread_safe(show_restart_dialog)
+                elif hasattr(_flet_page_instance, 'add_to_control_event_queue'):
+                    _flet_page_instance.add_to_control_event_queue(show_restart_dialog)
+                else:
+                    # 如果都不支持，直接調用
+                    show_restart_dialog()
+            except Exception as e:
+                print(f"顯示重啟對話框時出錯: {str(e)}")
+                # 如果無法顯示對話框，直接關閉並重啟
+                close_window_and_restart()
+        else:
+            # 如果沒有頁面實例，直接關閉並重啟
+            close_window_and_restart()
+        
+        return True
+    except Exception as e:
+        print(f"準備重啟應用時出錯: {str(e)}")
+        traceback.print_exc()
+        return False
+
 if __name__ == "__main__":
-    if getattr(sys, 'frozen', False):
-        application_path = os.path.dirname(sys.executable)
-    else:
-        application_path = os.path.dirname(os.path.abspath(__file__))
-    
-    os.chdir(application_path)
-    
-    icon_path = get_resource_path("YuCursor.png")
-    
-    # 使用設置防止按鈕點擊問題
-    if getattr(sys, 'frozen', False):
-        # 在打包環境中運行 - 使用標準的 ft.app 方法
+    try:
+        # 檢查是否為重啟模式
+        is_restarted = "--restarted" in sys.argv
+        
+        if is_restarted:
+            print("檢測到重啟模式，進行特殊初始化...")
+            # 如果是重啟模式，確保環境變數重新載入
+            time.sleep(0.5)  # 短暫延遲確保資源釋放
+            
+            # 重新載入關鍵模組
+            for module_name in ['config', 'accounts_manager', 'cursor_auth_manager']:
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+                    print(f"已強制重新載入 {module_name} 模組")
+            
+            # 不再使用已棄用的 os._environ
+            try:
+                # 使用替代方法重載環境變數
+                import os
+                # 載入 .env 檔案內容到環境變數
+                if os.path.exists(".env"):
+                    with open(".env", "r", encoding="utf-8") as env_file:
+                        for line in env_file:
+                            line = line.strip()
+                            if not line or line.startswith("#"):
+                                continue
+                            if "=" in line:
+                                key, value = line.split("=", 1)
+                                # 移除引號
+                                key = key.strip()
+                                value = value.strip()
+                                if (value.startswith("'") and value.endswith("'")) or (value.startswith('"') and value.endswith('"')):
+                                    value = value[1:-1]
+                                # 設置環境變數
+                                os.environ[key] = value
+                    print("已從 .env 檔案重新載入環境變數")
+            except Exception as e:
+                print(f"重載環境變數時出錯: {str(e)}")
+            traceback.print_exc()
+        
+        # 設置工作目錄
+        if getattr(sys, 'frozen', False):
+            application_path = os.path.dirname(sys.executable)
+        else:
+            application_path = os.path.dirname(os.path.abspath(__file__))
+        
+        print(f"應用路徑: {application_path}")
+        os.chdir(application_path)
+        
+        # 確保資源路徑正確
+        icon_path = get_resource_path("YuCursor.png")
+        print(f"圖標路徑: {icon_path}")
+        
+        # 設置 Flet 環境
         os.environ["FLET_FORCE_WEB_VIEW"] = "true"
         os.environ["FLET_VIEW"] = "gui"  # 使用 gui 模式
-        ft.app(target=main, assets_dir=application_path, view=ft.AppView.FLET_APP)
-    else:
-        # 在開發環境中運行 
-        ft.app(target=main, assets_dir=application_path, view=ft.AppView.FLET_APP)
+        
+        # 啟動 Flet 應用
+        print("啟動 Flet 應用...")
+        
+        # 檢測可用端口
+        def find_available_port(start_port=8500, max_tries=50):
+            """尋找可用的端口，避免端口衝突"""
+            import socket
+            port = start_port
+            for _ in range(max_tries):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.bind(('127.0.0.1', port))
+                        return port
+                except OSError:
+                    port += 1
+            return None
+        
+        # 找到可用端口
+        port = find_available_port()
+        if port is None:
+            print("警告：找不到可用端口，使用默認端口")
+            # 使用明確的 IP 地址而非主機名
+            ft.app(target=main, assets_dir=application_path, view=ft.AppView.FLET_APP)
+        else:
+            print(f"使用端口: {port}")
+            # 使用明確的 IP 地址和特定端口
+            ft.app(target=main, assets_dir=application_path, view=ft.AppView.FLET_APP, 
+                 host="127.0.0.1", port=port)
+    except Exception as startup_error:
+        print(f"啟動應用時發生錯誤: {str(startup_error)}")
+        traceback.print_exc()
+        
+        # 顯示錯誤訊息對話框
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("啟動錯誤", f"應用啟動失敗:\n{str(startup_error)}\n\n請檢查日誌以獲取更多訊息。")
+        except Exception:
+            pass  # 無法顯示對話框時，至少確保錯誤已記錄
