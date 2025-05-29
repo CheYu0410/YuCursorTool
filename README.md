@@ -1,7 +1,10 @@
 # YuCursor - Cursor Tool 編輯器自動化工具
 
+- YuCursorTool官方網站：[點我前往](https://970410.xyz)
+
 ## 專案介紹
 YuCursor 是一款專為 Cursor 編輯器設計的帳號管理和自動化工具，幫助用戶輕鬆創建和管理多個 Cursor 帳號。
+
 
 ## 版本資訊
 - 當前版本：1.0.4
