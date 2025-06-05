@@ -8,6 +8,7 @@ YuCursor 是一款專為 Cursor 編輯器設計的帳號管理和自動化工具
 - 當前版本：1.0.6
 - 發布日期：2025年6月5日
 
+
 ## 更新日誌
 ### 版本 1.0.6 (2025年6月5日)
 - 新增 Augment 白嫖工具 
@@ -19,6 +20,9 @@ YuCursor 是一款專為 Cursor 編輯器設計的帳號管理和自動化工具
 - TempMail.Plus 整合
 - JSON 數據存儲
 - 響應式佈局
+### ⚠️Augment如果出現以下提示⚠️
+![image](https://github.com/user-attachments/assets/13e5594a-acb9-4d51-824e-6035f1c7a360)
+### 就回到功能操作點擊![image](https://github.com/user-attachments/assets/84f417e5-a1fb-4296-8f22-01f622b999c9) 僅限在cursor內使用augment
 
 ### 版本 1.0.5beta (2025年5月30日)
 - 新增自動更新檢查功能
