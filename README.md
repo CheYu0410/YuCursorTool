@@ -20,6 +20,11 @@ YuCursor 是一款專為 Cursor 編輯器設計的帳號管理和自動化工具
 - TempMail.Plus 整合
 - JSON 數據存儲
 - 響應式佈局
+
+### ⚠️Augment白嫖功能請勿短時間連續註冊 會導致註冊最後一步的按鈕無法點擊 因此無法完成註冊⚠️
+- 解決方法:換其他設備註冊好了之後 再換到原本的設備用剛註冊好的帳號登入(這樣就不需要按那顆按紐 所以就可以正常登入了)
+- 目前還不知道 按鈕無法點擊的問題會不會過幾天就好 希望可以有好心人幫忙測試(重置cursor的機器碼不行 已經測試過了)
+
 ### ⚠️Augment如果出現以下提示⚠️
 ![image](https://github.com/user-attachments/assets/13e5594a-acb9-4d51-824e-6035f1c7a360)
 ### 就回到功能操作點擊![image](https://github.com/user-attachments/assets/84f417e5-a1fb-4296-8f22-01f622b999c9) 僅限在cursor內使用augment
